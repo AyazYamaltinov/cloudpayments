@@ -183,18 +183,49 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
     }
 
     private fun onPaymentOk(data: Intent?) {
-        val paymentInfo = PaymentData.getFromIntent(data)?.toJson()
-        lastPaymentResult?.success(mapOf("status" to "SUCCESS", "result" to paymentInfo))
+        if (data == null) {
+            lastPaymentResult?.error("RequestPayment", "Intent is null", null)
+        } else {
+            val paymentData = PaymentData.getFromIntent(data)
+
+            if (paymentData == null) {
+                lastPaymentResult?.error("RequestPayment", "Payment data is null", null)
+            } else {
+                val paymentInfo: String = paymentData.toJson()
+
+                lastPaymentResult?.success(mapOf(
+                    "status" to "SUCCESS",
+                    "result" to paymentInfo
+                ))
+            }
+        }
         lastPaymentResult = null
     }
-
     private fun onPaymentCanceled() {
-        lastPaymentResult?.success(mapOf("status" to "CANCELED"))
+        lastPaymentResult?.success(mapOf(
+            "status" to "CANCELED"
+        ))
+
         lastPaymentResult = null
     }
 
     private fun onPaymentError(data: Intent?) {
-        lastPaymentResult?.error("RequestPayment", "Google Pay error", null)
+        if (data == null) {
+            lastPaymentResult?.error("RequestPayment", "Intent is null", null)
+        } else {
+            val status = AutoResolveHelper.getStatusFromIntent(data)
+            if (status == null) {
+                lastPaymentResult?.error("RequestPayment", "Status is null", null)
+            } else {
+                lastPaymentResult?.success(mapOf(
+                    "status" to "ERROR",
+                    "error_code" to status.statusCode,
+                    "error_message" to status.statusMessage,
+                    "error_description" to status.toString()
+                ))
+            }
+        }
         lastPaymentResult = null
     }
+
 }
