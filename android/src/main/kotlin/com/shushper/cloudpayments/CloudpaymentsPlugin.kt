@@ -3,7 +3,6 @@ package com.shushper.cloudpayments
 import android.app.Activity.RESULT_CANCELED
 import android.app.Activity.RESULT_OK
 import android.content.Intent
-import android.util.Log
 import androidx.annotation.NonNull
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.wallet.*
@@ -20,11 +19,18 @@ import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import io.flutter.plugin.common.PluginRegistry
+import java.io.UnsupportedEncodingException
+import java.security.InvalidKeyException
+import java.security.NoSuchAlgorithmException
+import javax.crypto.BadPaddingException
+import javax.crypto.IllegalBlockSizeException
+import javax.crypto.NoSuchPaddingException
 
 const val LOAD_PAYMENT_DATA_REQUEST_CODE = 991
 
 /** CloudpaymentsPlugin */
 class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, PluginRegistry.ActivityResultListener {
+
     private lateinit var channel: MethodChannel
     private var activity: FlutterFragmentActivity? = null
     private var binding: ActivityPluginBinding? = null
@@ -54,11 +60,15 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
-        onDetachedFromActivity()
+        this.activity = null
+        binding?.removeActivityResultListener(this)
+        binding = null
     }
 
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
-        onAttachedToActivity(binding)
+        this.activity = binding.activity as? FlutterFragmentActivity
+        this.binding = binding
+        binding.addActivityResultListener(this)
     }
 
     override fun onMethodCall(@NonNull call: MethodCall, @NonNull result: Result) {
@@ -68,51 +78,60 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
             "cardCryptogram" -> result.success(cardCryptogram(call))
             "show3ds" -> show3ds(call, result)
             "createPaymentsClient" -> createPaymentsClient(call, result)
-            "isGooglePayAvailable" -> checkIsGooglePayAvailable(result)
+            "isGooglePayAvailable" -> checkIsGooglePayAvailable(call, result)
             "requestGooglePayPayment" -> requestGooglePayPayment(call, result)
             else -> result.notImplemented()
         }
     }
 
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+        return if (requestCode == LOAD_PAYMENT_DATA_REQUEST_CODE) {
+            when (resultCode) {
+                RESULT_OK -> onPaymentOk(data)
+                RESULT_CANCELED -> onPaymentCanceled()
+                AutoResolveHelper.RESULT_ERROR -> onPaymentError(data)
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     private fun isValidNumber(call: MethodCall): Boolean {
-        val cardNumber = call.argument<String>("cardNumber") ?: return false
-        return CPCard.isValidNumber(cardNumber)
+        val params = call.arguments as Map<String, Any>
+        return CPCard.isValidNumber(params["cardNumber"] as String)
     }
 
     private fun isValidExpiryDate(call: MethodCall): Boolean {
-        val expiryDate = call.argument<String>("expiryDate") ?: return false
-        return CPCard.isValidExpDate(expiryDate)
+        val params = call.arguments as Map<String, Any>
+        return CPCard.isValidExpDate(params["expiryDate"] as String)
     }
 
     private fun cardCryptogram(call: MethodCall): Map<String, Any?> {
-        val cardNumber = call.argument<String>("cardNumber") ?: return mapOf("error" to "Missing cardNumber")
-        val cardDate = call.argument<String>("cardDate") ?: return mapOf("error" to "Missing cardDate")
-        val cardCVC = call.argument<String>("cardCVC") ?: return mapOf("error" to "Missing cardCVC")
-        val publicId = call.argument<String>("publicId") ?: return mapOf("error" to "Missing publicId")
-
-        val card = CPCard(cardNumber, cardDate, cardCVC)
+        val params = call.arguments as Map<String, Any>
+        val card = CPCard(params["cardNumber"] as String, params["cardDate"] as String, params["cardCVC"] as String)
         return try {
-            mapOf("cryptogram" to card.cardCryptogram(publicId), "error" to null)
+            mapOf("cryptogram" to card.cardCryptogram(params["publicId"] as String), "error" to null)
         } catch (e: Exception) {
-            mapOf("cryptogram" to null, "error" to e.javaClass.simpleName)
+            e.printStackTrace()
+            mapOf("cryptogram" to null, "error" to e::class.java.simpleName)
         }
     }
 
     private fun show3ds(call: MethodCall, result: Result) {
-        val acsUrl = call.argument<String>("acsUrl") ?: return result.error("MissingParam", "acsUrl is required", null)
-        val transactionId = call.argument<String>("transactionId") ?: return result.error("MissingParam", "transactionId is required", null)
-        val paReq = call.argument<String>("paReq") ?: return result.error("MissingParam", "paReq is required", null)
-
+        val params = call.arguments as Map<String, Any>
         activity?.let {
-            val dialog = ThreeDsDialogFragment.newInstance(acsUrl, transactionId, paReq)
+            val dialog = ThreeDsDialogFragment.newInstance(params["acsUrl"] as String, params["transactionId"] as String, params["paReq"] as String)
             dialog.show(it.supportFragmentManager, "3DS")
             dialog.setListener(object : ThreeDSDialogListener {
                 override fun onAuthorizationCompleted(md: String, paRes: String) {
                     result.success(mapOf("md" to md, "paRes" to paRes))
                 }
+
                 override fun onAuthorizationFailed(html: String?) {
                     result.error("AuthorizationFailed", "authorizationFailed", null)
                 }
+
                 override fun onCancel() {
                     result.success(null)
                 }
@@ -121,51 +140,61 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
     }
 
     private fun createPaymentsClient(call: MethodCall, result: Result) {
-        val environment = when (call.argument<String>("environment")) {
+        val environment = when ((call.arguments as Map<String, Any>)["environment"] as String) {
             "test" -> WalletConstants.ENVIRONMENT_TEST
             "production" -> WalletConstants.ENVIRONMENT_PRODUCTION
             else -> WalletConstants.ENVIRONMENT_TEST
         }
+
         activity?.let {
             paymentsClient = GooglePayUtil.createPaymentsClient(it, environment)
             result.success(null)
         } ?: result.error("GooglePayError", "Couldn't create Payments Client", null)
     }
 
-    private fun checkIsGooglePayAvailable(result: Result) {
-        val request = GooglePayUtil.isReadyToPayRequest()?.let { IsReadyToPayRequest.fromJson(it.toString()) }
-        if (request == null) {
-            result.error("GooglePayError", "Google Pay is not available", null)
-            return
-        }
+    private fun checkIsGooglePayAvailable(call: MethodCall, result: Result) {
+        val request = IsReadyToPayRequest.fromJson(GooglePayUtil.isReadyToPayRequest()?.toString())
         paymentsClient?.isReadyToPay(request)?.addOnCompleteListener { task ->
             try {
                 result.success(task.getResult(ApiException::class.java))
             } catch (e: ApiException) {
                 result.error("GooglePayError", e.message, null)
             }
-        }
+        } ?: result.error("GooglePayError", "Google Pay is not available", null)
     }
 
     private fun requestGooglePayPayment(call: MethodCall, result: Result) {
-        val price = call.argument<String>("price") ?: return result.error("MissingParam", "price is required", null)
-        val currencyCode = call.argument<String>("currencyCode") ?: return result.error("MissingParam", "currencyCode is required", null)
-        val countryCode = call.argument<String>("countryCode") ?: return result.error("MissingParam", "countryCode is required", null)
-        val merchantName = call.argument<String>("merchantName") ?: return result.error("MissingParam", "merchantName is required", null)
-        val publicId = call.argument<String>("publicId") ?: return result.error("MissingParam", "publicId is required", null)
-
-        val paymentDataRequestJson = GooglePayUtil.getPaymentDataRequest(price, currencyCode, countryCode, merchantName, publicId)
-        val request = paymentDataRequestJson?.let { PaymentDataRequest.fromJson(it.toString()) }
-        if (request == null) {
-            result.error("RequestPayment", "Can't fetch payment data request", null)
-            return
-        }
-
+        val params = call.arguments as Map<String, Any>
+        val request = PaymentDataRequest.fromJson(
+            GooglePayUtil.getPaymentDataRequest(
+                params["price"] as String,
+                params["currencyCode"] as String,
+                params["countryCode"] as String,
+                params["merchantName"] as String,
+                params["publicId"] as String
+            )?.toString()
+        )
         lastPaymentResult = result
-        activity?.let {
-            paymentsClient?.loadPaymentData(request)?.let { task ->
-                AutoResolveHelper.resolveTask(task, it, LOAD_PAYMENT_DATA_REQUEST_CODE)
+        activity?.let { act ->
+            paymentsClient?.let {
+                AutoResolveHelper.resolveTask(it.loadPaymentData(request), act, LOAD_PAYMENT_DATA_REQUEST_CODE)
             }
-        }
+        } ?: result.error("RequestPayment", "Cannot start Google Pay flow", null)
+    }
+
+    private fun onPaymentOk(data: Intent?) {
+        val paymentInfo = PaymentData.getFromIntent(data)?.toJson()
+        lastPaymentResult?.success(mapOf("status" to "SUCCESS", "result" to paymentInfo))
+        lastPaymentResult = null
+    }
+
+    private fun onPaymentCanceled() {
+        lastPaymentResult?.success(mapOf("status" to "CANCELED"))
+        lastPaymentResult = null
+    }
+
+    private fun onPaymentError(data: Intent?) {
+        lastPaymentResult?.error("RequestPayment", "Google Pay error", null)
+        lastPaymentResult = null
     }
 }
